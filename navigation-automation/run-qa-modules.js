@@ -8,13 +8,16 @@ const BASE_CONFIG = JSON.parse(fs.readFileSync(BASE_CONFIG_PATH, 'utf8'));
 const RUN_ID = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').replace(/\.\d{3}Z$/, '');
 const MAX_PAGES = process.env.NAVEGA_MODULE_MAX_PAGES || '100';
 
-const MODULES = [
-  { name: 'user', route: '#/user' },
-  { name: 'on-boarding', route: '#/on-boarding' },
-  { name: 'leo', route: '#/leo' },
-  { name: 'sponsor-admin', route: '#/sponsor-admin' },
-  { name: 'operations', route: '#/operations' }
+const ALL_MODULES = [
+  { name: 'user', route: '#/user', entryText: 'Parámetros del Sistema' },
+  { name: 'on-boarding', route: '#/on-boarding', entryText: 'Vinculación' },
+  { name: 'leo', route: '#/leo', entryText: 'Libro Electrónico de Ordenes' },
+  { name: 'sponsor-admin', route: '#/sponsor-admin', entryText: 'Operadores y Promotores' },
+  { name: 'operations', route: '#/operations', entryText: 'Seguimiento de operaciones' }
 ];
+const MODULES = process.env.NAVEGA_MODULES
+  ? ALL_MODULES.filter(module => process.env.NAVEGA_MODULES.split(',').map(value => value.trim()).includes(module.name))
+  : ALL_MODULES;
 
 function runNode(script, args) {
   const result = spawnSync(process.execPath, [path.join(__dirname, script), ...args], { stdio: 'inherit' });
@@ -28,10 +31,14 @@ function runNode(script, args) {
 function moduleConfig(module) {
   return {
     ...BASE_CONFIG,
-    startUrl: `${new URL(BASE_CONFIG.startUrl).origin}/${module.route}`,
-    crawlStartUrl: `${new URL(BASE_CONFIG.startUrl).origin}/${module.route}`,
+    startUrl: BASE_CONFIG.startUrl,
     maxPages: Number(MAX_PAGES),
+    freshLoginOnExecute: true,
     enqueueLinks: true,
+    postLoginActions: [
+      { type: 'click', label: 'abrir_menu_lateral', selector: 'button.row.ham-nav, button.ham-nav, .ham-nav', timeoutMs: 10000, afterWaitMs: 1500 },
+      { type: 'click', label: `abrir_modulo_${module.name}`, selector: `div.cajaUnica:has-text("${module.entryText}"), div.boxImagenes:has-text("${module.entryText}")`, timeoutMs: 20000, afterWaitMs: 4000 }
+    ],
     menuClickDiscovery: {
       ...(BASE_CONFIG.menuClickDiscovery || {}),
       enabled: false,

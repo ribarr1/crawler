@@ -30,7 +30,7 @@ npm run execute:qa
 
 Cada corrida QA crea carpetas nuevas con fecha y hora. `execute:qa` utiliza automáticamente la última corrida generada por `crawl:qa`.
 
-Para recorrer QA por módulos, renovando la sesión en cada módulo y ejecutando cada uno inmediatamente:
+Para recorrer QA por módulos, renovando la sesión en cada módulo y entrando a cada módulo mediante el enlace del home (evita errores de URL directa):
 npm run qa:modules
 
 El flujo modular procesa Usuarios, Vinculación, LEO, Operadores y Promotores y Operaciones. Cada módulo conserva su propio inventario, evidencias y reportes. Puedes limitar páginas por módulo con `$env:NAVEGA_MODULE_MAX_PAGES="100"`.

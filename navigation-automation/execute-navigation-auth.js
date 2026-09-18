@@ -1,3 +1,4 @@
+require('dotenv').config();
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
@@ -123,7 +124,9 @@ function shouldExecute(item) {
   const cls = String(item.className || '').toLowerCase();
   const actionKey = String(item.actionKey || '').toLowerCase();
 
-  if (text === 'cerrar sesion' || text === 'cerrar sesión' || text === 'logout' || text === 'pruebas qa') return false;
+  if (CONFIG.freshLoginOnExecute === true && actionKey.startsWith('nav|shell|')) return false;
+
+  if (text.includes('cerrar sesion') || text.includes('cerrar sesión') || text === 'logout' || text === 'pruebas qa') return false;
   if (cls.includes('btncerrarsesion') || cls.includes('btnnombreusuario')) return false;
   if (selector.includes('btncerrarsesion')) return false;
   if (href === '#' || href.startsWith('javascript:')) return false;
@@ -142,6 +145,65 @@ function isDestructiveAction(item) {
     .map(normalizeKeyText)
     .join(' ');
   return /\b(eliminar|delete|borrar|erase|remove|destroy|desactivar|deactivate|cancelar cuenta|cancel account)\b/.test(searchableText);
+}
+
+function splitSelectors(selector) {
+  return String(selector || '').split(',').map(value => value.trim()).filter(Boolean);
+}
+
+async function findVisibleInFrames(page, selector, timeoutMs = 15000) {
+  const selectors = splitSelectors(selector);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const frame of page.frames()) {
+      if (!shouldInspectFrame(frame.url())) continue;
+      for (const currentSelector of selectors) {
+        const locator = frame.locator(currentSelector).first();
+        if (await locator.count().catch(() => 0) && await locator.isVisible({ timeout: 500 }).catch(() => false)) {
+          return locator;
+        }
+      }
+    }
+    await page.waitForTimeout(300);
+  }
+  return null;
+}
+
+async function loginAndBootstrap(page, item) {
+  const auth = CONFIG.auth || {};
+  if (!auth.enabled || CONFIG.freshLoginOnExecute !== true) return;
+
+  const username = process.env[auth.usernameEnv || 'NAVEGA_USER'];
+  const password = process.env[auth.passwordEnv || 'NAVEGA_PASSWORD'];
+  if (!username || !password) throw new Error('Faltan credenciales para login durante execute.');
+
+  await page.goto(auth.loginUrl || CONFIG.startUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUT_MS });
+  const usernameLocator = await findVisibleInFrames(page, auth.usernameSelector || 'input[type="text"]');
+  const passwordLocator = await findVisibleInFrames(page, auth.passwordSelector || 'input[type="password"]');
+  if (!usernameLocator || !passwordLocator) throw new Error('No se encontraron los campos de login durante execute.');
+  await usernameLocator.fill(username);
+  await passwordLocator.fill(password);
+  const submitLocator = await findVisibleInFrames(page, auth.submitSelector || 'button[type="submit"]');
+  if (!submitLocator) throw new Error('No se encontró el botón de login durante execute.');
+  await submitLocator.click({ timeout: CLICK_TIMEOUT_MS });
+  await page.waitForLoadState('networkidle', { timeout: TIMEOUT_MS }).catch(() => {});
+  await page.waitForTimeout(Number(auth.postLoginWaitMs || 6000));
+
+  for (const action of CONFIG.postLoginActions || []) {
+    if (action.type !== 'click' || !action.selector) continue;
+    const locator = await findVisibleInFrames(page, action.selector, Number(action.timeoutMs || 15000));
+    if (!locator) throw new Error(`No fue posible ejecutar bootstrap: ${action.label || action.selector}`);
+    await locator.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => locator.evaluate(element => element.click()));
+    await page.waitForTimeout(Number(action.afterWaitMs || 1500));
+  }
+
+  const expectedHash = (() => {
+    try { return new URL(item.pageUrl).hash; } catch { return ''; }
+  })();
+  if (expectedHash) {
+    await page.waitForURL(url => url.hash === expectedHash, { timeout: TIMEOUT_MS }).catch(() => {});
+    await page.waitForTimeout(Number(CONFIG.moduleReadyWaitMs || 3000));
+  }
 }
 
 function createSkippedResult(item, caseNumber) {
@@ -329,9 +391,14 @@ async function executeItem(context, item, caseNumber) {
 
   const page = await context.newPage();
   try {
-    await page.goto(item.pageUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUT_MS }).catch(err => {
-      console.warn(`Advertencia al cargar página base: ${item.pageUrl} - ${err.message}`);
-    });
+    await loginAndBootstrap(page, item);
+    const bootstrappedRoute = normalizeUrlForKey(page.url(), page.url());
+    const itemRoute = normalizeUrlForKey(item.pageUrl, page.url());
+    if (CONFIG.freshLoginOnExecute !== true || bootstrappedRoute !== itemRoute) {
+      await page.goto(item.pageUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUT_MS }).catch(err => {
+        console.warn(`Advertencia al cargar página base: ${item.pageUrl} - ${err.message}`);
+      });
+    }
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
     await page.waitForTimeout(2500);
     await page.screenshot({ path: beforeScreenshot, fullPage: true });
