@@ -1,0 +1,13 @@
+.env
+auth-storage-state.json
+**/auth-storage-state.json
+output-navigation*/
+evidence-navigation*/
+debug-login/
+*.xlsx
+.last-qa-run.json
+.last-public-run.json
+.last-qa-modules-run.json
+.qa-module-config/
+playwright-report/
+test-results/

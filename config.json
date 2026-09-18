@@ -1,0 +1,56 @@
+{
+  "startUrl": "https://backoffice.qa.bmcbackoffice.com.co/?_cid_134f3d5c-9305-4d3d-b138-223466013612_cid_",
+  "maxPages": 100,
+  "sameDomainOnly": true,
+  "headless": false,
+  "timeoutMs": 90000,
+  "postLoadWaitMs": 7000,
+  "crawlFrames": true,
+  "enqueueLinks": true,
+  "debugCrawlSnapshot": true,
+  "allowDestructiveActions": false,
+  "auth": {
+    "enabled": true,
+    "loginUrl": "https://backoffice.qa.bmcbackoffice.com.co/?_cid_134f3d5c-9305-4d3d-b138-223466013612_cid_",
+    "usernameEnv": "NAVEGA_USER",
+    "passwordEnv": "NAVEGA_PASSWORD",
+    "usernameSelector": "#username, input#username, input[name=\"username\"], input[formcontrolname=\"username\"], input[placeholder=\"Ingrese su usuario\"], input[type=\"text\"]",
+    "passwordSelector": "#password, input#password, input[name=\"password\"], input[formcontrolname=\"password\"], input[type=\"password\"]",
+    "submitSelector": "#btn-login, button#btn-login, button:has-text(\"INGRESAR\"), button:has-text(\"Ingresar\"), button.btnPrincipal",
+    "preLoginWaitMs": 5000,
+    "postLoginWaitMs": 9000,
+    "debugScreenshot": true,
+    "storageStateFile": "auth-storage-state.json"
+  },
+  "menuClickDiscovery": {
+    "enabled": true,
+    "selector": "div.boxNaviButton, [class*=\"boxNaviButton\"], [role=\"menuitem\"], [routerLink], [routerlink], [ng-reflect-router-link]",
+    "skipTexts": [
+      "Cerrar sesión",
+      "Pruebas QA",
+      "visibility"
+    ],
+    "maxItems": 40,
+    "clickTimeoutMs": 10000,
+    "beforeClickWaitMs": 1000,
+    "afterClickWaitMs": 4000,
+    "enqueueDiscoveredUrls": true,
+    "runOnEveryPage": true,
+    "excludeShellToggleFromInventory": true
+  },
+  "submenuClickDiscovery": {
+    "enabled": true,
+    "menuSelector": "#dropdownBasic1, button#dropdownBasic1, button.dropdown-toggle, button:has-text(\"Menú\"), button:has-text(\"Menu\")",
+    "itemSelector": "button.dropdown-item, .dropdown-item, [class*=\"dropdown-item\"], [role=\"menuitem\"]",
+    "maxItems": 30,
+    "beforeCollectWaitMs": 800,
+    "beforeClickWaitMs": 500,
+    "afterClickWaitMs": 2200,
+    "clickTimeoutMs": 8000,
+    "skipTexts": [
+      "Cerrar sesión",
+      "Pruebas QA",
+      "visibility"
+    ]
+  }
+}

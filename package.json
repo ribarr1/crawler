@@ -1,0 +1,27 @@
+{
+  "name": "navega",
+  "version": "1.0.0",
+  "description": "Framework de pruebas automatizadas de navegabilidad con Playwright",
+  "main": "index.js",
+  "scripts": {
+    "crawl:qa": "node navigation-automation/run-qa-crawl.js",
+    "execute:qa": "node navigation-automation/run-qa-execute.js",
+    "qa:modules": "node navigation-automation/run-qa-modules.js",
+    "crawl:public": "node navigation-automation/run-public-crawl.js",
+    "execute:public": "node navigation-automation/run-public-execute.js",
+    "execute:public:visible": "node navigation-automation/run-public-execute.js false",
+    "compare": "node navigation-automation/run-compare.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "exceljs": "^4.4.0",
+    "playwright-core": "^1.60.0"
+  }
+}
