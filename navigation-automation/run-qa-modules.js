@@ -12,7 +12,7 @@ const ALL_MODULES = [
   { name: 'user', route: '#/user', entryText: 'Parámetros del Sistema' },
   { name: 'on-boarding', route: '#/on-boarding', entryText: 'Vinculación' },
   { name: 'leo', route: '#/leo', entryText: 'Libro Electrónico de Ordenes' },
-  { name: 'sponsor-admin', route: '#/sponsor-admin', entryText: 'Operadores y Promotores' },
+  { name: 'sponsor-admin', route: '#/sponsor-admin', entryText: 'Operadores y Promotores', entrySelector: 'div.boxNaviButton:has-text("Operadores y Promotores"), div.cajaUnica:has-text("Operadores y Promotores"), div.boxImagenes:has-text("Operadores y Promotores")' },
   { name: 'operations', route: '#/operations', entryText: 'Seguimiento de operaciones' }
 ];
 const MODULES = process.env.NAVEGA_MODULES
@@ -34,10 +34,14 @@ function moduleConfig(module) {
     startUrl: BASE_CONFIG.startUrl,
     maxPages: Number(MAX_PAGES),
     freshLoginOnExecute: true,
+    reuseModuleSession: true,
     enqueueLinks: true,
     postLoginActions: [
       { type: 'click', label: 'abrir_menu_lateral', selector: 'button.row.ham-nav, button.ham-nav, .ham-nav', timeoutMs: 10000, afterWaitMs: 1500 },
-      { type: 'click', label: `abrir_modulo_${module.name}`, selector: `div.cajaUnica:has-text("${module.entryText}"), div.boxImagenes:has-text("${module.entryText}")`, timeoutMs: 20000, afterWaitMs: 4000 }
+      ...(module.name === 'sponsor-admin'
+        ? [{ type: 'click', label: 'avanzar_carrusel_sponsor_admin', selector: '#button-toggle.toggle_menu, #button-toggle', timeoutMs: 10000, afterWaitMs: 1500 }]
+        : []),
+      { type: 'click', label: `abrir_modulo_${module.name}`, selector: module.entrySelector || `div.cajaUnica:has-text("${module.entryText}"), div.boxImagenes:has-text("${module.entryText}"), div.boxNaviButton:has-text("${module.entryText}")`, timeoutMs: 20000, afterWaitMs: 4000 }
     ],
     menuClickDiscovery: {
       ...(BASE_CONFIG.menuClickDiscovery || {}),
@@ -53,6 +57,7 @@ function moduleConfig(module) {
 }
 
 function main() {
+  const totalStart = Date.now();
   const runRoot = `output-navigation-backoffice-qa-modules-${RUN_ID}`;
   const evidenceRoot = `evidence-navigation-backoffice-qa-modules-${RUN_ID}`;
   const tempRoot = path.join(ROOT, '.qa-module-config');
@@ -62,6 +67,7 @@ function main() {
   console.log(`Módulos: ${MODULES.map(module => module.name).join(', ')}`);
 
   for (const module of MODULES) {
+    const moduleStart = Date.now();
     const outputDir = path.join(runRoot, module.name);
     const evidenceDir = path.join(evidenceRoot, module.name);
     const configPath = path.join(tempRoot, `${module.name}-${RUN_ID}.json`);
@@ -76,6 +82,7 @@ function main() {
     ]);
     if (crawlStatus !== 0) {
       console.error(`Módulo ${module.name}: crawl falló. Se continúa con el siguiente módulo.`);
+      console.log(`Módulo ${module.name}: ${Date.now() - moduleStart} ms`);
       continue;
     }
 
@@ -90,16 +97,20 @@ function main() {
     if (executeStatus !== 0) {
       console.error(`Módulo ${module.name}: execute falló. Se continúa con el siguiente módulo.`);
     }
+    console.log(`Módulo ${module.name}: ${Date.now() - moduleStart} ms`);
   }
 
-  fs.writeFileSync(path.join(ROOT, '.last-qa-modules-run.json'), JSON.stringify({
+  const runSummary = {
     runId: RUN_ID,
     outputRoot: runRoot,
     evidenceRoot,
-    modules: MODULES.map(module => module.name)
-  }, null, 2));
+    modules: MODULES.map(module => module.name),
+    totalDurationMs: Date.now() - totalStart
+  };
+  fs.writeFileSync(path.join(ROOT, '.last-qa-modules-run.json'), JSON.stringify(runSummary, null, 2));
   console.log(`\nCorrida modular finalizada: ${runRoot}`);
   console.log(`Evidencias: ${evidenceRoot}`);
+  console.log(`Duración total: ${runSummary.totalDurationMs} ms`);
 }
 
 main();

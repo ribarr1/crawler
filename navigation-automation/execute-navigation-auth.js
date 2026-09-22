@@ -25,6 +25,8 @@ const HEADLESS = CONFIG.headlessExecute ?? CONFIG.headless ?? true;
 const TIMEOUT_MS = Number(CONFIG.timeoutMs || 90000);
 const CLICK_TIMEOUT_MS = Number(CONFIG.clickTimeoutMs || 15000);
 const POST_ACTION_WAIT_MS = Number(CONFIG.postActionWaitMs || 3500);
+const ACTION_RESPONSE_TIMEOUT_MS = Number(CONFIG.actionResponseTimeoutMs || 5000);
+const ACTION_SETTLE_WAIT_MS = Number(CONFIG.actionSettleWaitMs || 300);
 const ALLOW_DESTRUCTIVE_ACTIONS = CONFIG.allowDestructiveActions === true || process.env.NAVEGA_ALLOW_DESTRUCTIVE_ACTIONS === 'true';
 
 function ensureDir(dir) {
@@ -99,6 +101,61 @@ function writeCsv(filePath, rows) {
 function normalizeHref(href, baseUrl) {
   if (!href) return '';
   try { return new URL(href, baseUrl).href; } catch { return href; }
+}
+
+async function waitForActionResponse(page, urlBefore, bodyBefore, navigationPromise, popupPromise, downloadPromise) {
+  const responseTimeout = ACTION_RESPONSE_TIMEOUT_MS;
+  const domChangePromise = page.waitForFunction(
+    ({ initialUrl, initialBody }) => location.href !== initialUrl || (document.body?.innerText || '') !== initialBody,
+    { initialUrl: urlBefore, initialBody: bodyBefore },
+    { timeout: responseTimeout }
+  ).then(() => 'dom-change').catch(() => null);
+  const timeoutPromise = new Promise(resolve => setTimeout(() => resolve('timeout'), responseTimeout));
+
+  return Promise.race([navigationPromise, popupPromise, downloadPromise, domChangePromise, timeoutPromise]);
+}
+
+async function acceptVisiblePopup(page) {
+  const popupSelector = CONFIG.popupSelector || '[role="dialog"], [aria-modal="true"], .modal.show, .modal-dialog, .modal-content, .swal2-popup, .mat-dialog-container, .cdk-overlay-pane, .toast, .alert';
+  const acceptTexts = CONFIG.popupAcceptTexts || ['Aceptar', 'OK', 'Ok', 'Entendido', 'Continuar', 'Cerrar', 'Continuar', 'Sí', 'Si'];
+  const acceptAttributes = '[aria-label="Aceptar"], [aria-label="Cerrar"], [title="Aceptar"], [title="Cerrar"], [value="Aceptar"], [value="OK"], .btn-close, .close, .modal-close';
+  for (const frame of page.frames()) {
+    if (!shouldInspectFrame(frame.url())) continue;
+    const popup = frame.locator(popupSelector).last();
+    if (!(await popup.count().catch(() => 0)) || !(await popup.isVisible({ timeout: 500 }).catch(() => false))) continue;
+
+    const controls = popup.locator('button, [role="button"], input[type="button"], input[type="submit"], a');
+    const controlCount = await controls.count().catch(() => 0);
+    for (let index = 0; index < controlCount; index += 1) {
+      const button = controls.nth(index);
+      if (!(await button.isVisible({ timeout: 500 }).catch(() => false))) continue;
+      const label = normalizeKeyText(
+        await button.innerText().catch(() => '') ||
+        await button.getAttribute('aria-label').catch(() => '') ||
+        await button.getAttribute('title').catch(() => '') ||
+        await button.getAttribute('value').catch(() => '')
+      );
+      if (!acceptTexts.some(text => label === normalizeKeyText(text))) continue;
+      await button.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => button.evaluate(element => element.click()));
+      await page.waitForTimeout(ACTION_SETTLE_WAIT_MS);
+      return true;
+    }
+
+    const attributeButton = popup.locator(acceptAttributes).first();
+    if (await attributeButton.count().catch(() => 0) && await attributeButton.isVisible({ timeout: 500 }).catch(() => false)) {
+      await attributeButton.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => attributeButton.evaluate(element => element.click()));
+      await page.waitForTimeout(ACTION_SETTLE_WAIT_MS);
+      return true;
+    }
+
+    const popupText = normalizeKeyText(await popup.innerText().catch(() => ''));
+    if (popupText.includes('no disponible') || popupText.includes('no esta disponible') || popupText.includes('no está disponible')) {
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(ACTION_SETTLE_WAIT_MS);
+      return true;
+    }
+  }
+  return false;
 }
 
 function isExternalUrl(url, baseUrl) {
@@ -369,7 +426,7 @@ async function fallbackNavigateByHref(page, item, result, afterScreenshot) {
   }
 }
 
-async function executeItem(context, item, caseNumber) {
+async function executeItem(context, item, caseNumber, sharedPage = null) {
   const caseId = `TC_NAV_${String(caseNumber).padStart(5, '0')}`;
   const startTime = Date.now();
   const elementName = safeFileName(item.text || item.title || item.ariaLabel || item.href || item.selector || `${item.tag || 'element'}`);
@@ -389,21 +446,26 @@ async function executeItem(context, item, caseNumber) {
     recommendedLocator: item.recommendedLocator || '', beforeScreenshot, afterScreenshot, downloadedFile: '', errorMessage: '', durationMs: 0
   };
 
-  const page = await context.newPage();
+  const page = sharedPage || await context.newPage();
   try {
-    await loginAndBootstrap(page, item);
+    if (!sharedPage || page.url() === 'about:blank') await loginAndBootstrap(page, item);
     const bootstrappedRoute = normalizeUrlForKey(page.url(), page.url());
     const itemRoute = normalizeUrlForKey(item.pageUrl, page.url());
-    if (CONFIG.freshLoginOnExecute !== true || bootstrappedRoute !== itemRoute) {
+    const itemFrameRoute = normalizeUrlForKey(item.frameUrl || '', item.pageUrl);
+    const sameMicrofrontend = item.frameUrl && page.frames().some(frame =>
+      normalizeUrlForKey(frame.url(), item.pageUrl) === itemFrameRoute
+    );
+    if (CONFIG.freshLoginOnExecute !== true || (bootstrappedRoute !== itemRoute && !sameMicrofrontend)) {
       await page.goto(item.pageUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUT_MS }).catch(err => {
         console.warn(`Advertencia al cargar página base: ${item.pageUrl} - ${err.message}`);
       });
     }
-    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(500);
     await page.screenshot({ path: beforeScreenshot, fullPage: true });
 
     const urlBefore = page.url();
+    const bodyBefore = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+    await acceptVisiblePopup(page);
     const locator = await resolveLocator(page, item);
     if (!locator) {
       const fallbackDone = await fallbackNavigateByHref(page, item, result, afterScreenshot);
@@ -426,6 +488,7 @@ async function executeItem(context, item, caseNumber) {
     }
 
     await locator.scrollIntoViewIfNeeded({ timeout: CLICK_TIMEOUT_MS }).catch(() => {});
+    await acceptVisiblePopup(page);
 
     const normalizedHref = normalizeHref(item.href, item.pageUrl);
     if (String(item.tag || '').toLowerCase() === 'a' && normalizedHref && isExternalUrl(normalizedHref, item.pageUrl)) {
@@ -437,25 +500,34 @@ async function executeItem(context, item, caseNumber) {
       return result;
     }
 
-    const downloadPromise = page.waitForEvent('download', { timeout: 10000 }).catch(() => null);
-    const popupPromise = page.waitForEvent('popup', { timeout: 10000 }).catch(() => null);
-    const navigationPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => null);
+    const downloadPromise = page.waitForEvent('download', { timeout: ACTION_RESPONSE_TIMEOUT_MS })
+      .then(download => ({ type: 'download', download })).catch(() => null);
+    const popupPromise = page.waitForEvent('popup', { timeout: ACTION_RESPONSE_TIMEOUT_MS })
+      .then(popup => ({ type: 'popup', popup })).catch(() => null);
+    const navigationPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: ACTION_RESPONSE_TIMEOUT_MS })
+      .then(() => 'navigation').catch(() => null);
 
     try {
       await locator.click({ timeout: CLICK_TIMEOUT_MS, button: 'left' });
     } catch (clickError) {
+      const popupClosed = await acceptVisiblePopup(page);
+      if (popupClosed) {
+        await locator.click({ timeout: CLICK_TIMEOUT_MS, button: 'left' }).catch(() => { throw clickError; });
+      } else {
       const fallbackDone = await fallbackNavigateByHref(page, item, result, afterScreenshot);
       if (fallbackDone) {
         result.errorMessage = `Click no ejecutado, se usó fallback por href. Error original: ${clickError.message}`;
         return result;
       }
       throw clickError;
+      }
     }
 
-    const [download, popup] = await Promise.all([downloadPromise, popupPromise]);
-    await navigationPromise;
-    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-    await page.waitForTimeout(POST_ACTION_WAIT_MS);
+    const response = await waitForActionResponse(page, urlBefore, bodyBefore, navigationPromise, popupPromise, downloadPromise);
+    await page.waitForTimeout(Math.min(POST_ACTION_WAIT_MS, ACTION_SETTLE_WAIT_MS));
+    const visiblePopupHandled = await acceptVisiblePopup(page);
+    const download = response && response.type === 'download' ? response.download : null;
+    const popup = response && response.type === 'popup' ? response.popup : null;
 
     if (download) {
       const suggestedName = download.suggestedFilename();
@@ -475,6 +547,13 @@ async function executeItem(context, item, caseNumber) {
       result.openedUrl = popup.url();
       await popup.screenshot({ path: afterScreenshot, fullPage: true }).catch(async () => page.screenshot({ path: afterScreenshot, fullPage: true }));
       await popup.close().catch(() => {});
+      return result;
+    }
+
+    if (visiblePopupHandled) {
+      result.status = 'PASSED_POPUP';
+      result.openedUrl = page.url();
+      await page.screenshot({ path: afterScreenshot, fullPage: true });
       return result;
     }
 
@@ -505,7 +584,7 @@ async function executeItem(context, item, caseNumber) {
     return result;
   } finally {
     result.durationMs = Date.now() - startTime;
-    await page.close().catch(() => {});
+    if (!sharedPage) await page.close().catch(() => {});
   }
 }
 
@@ -546,11 +625,12 @@ async function executeItem(context, item, caseNumber) {
   };
   if (storageState) contextOptions.storageState = storageState;
   const context = await browser.newContext(contextOptions);
+  const sharedPage = CONFIG.reuseModuleSession === true ? await context.newPage() : null;
   const results = skippedDestructiveItems.map((item, index) => createSkippedResult(item, index + 1));
   let caseNumber = results.length + 1;
   for (const item of executableItems) {
     console.log(`Ejecutando ${caseNumber}/${executableItems.length}: ${cleanText(item.text) || item.selector || item.href}`);
-    const result = await executeItem(context, item, caseNumber);
+    const result = await executeItem(context, item, caseNumber, sharedPage);
     results.push(result);
     console.log(`  ${result.status}`);
     caseNumber++;
@@ -591,5 +671,6 @@ async function executeItem(context, item, caseNumber) {
   console.log(`Reporte CSV: ${csvReport}`);
   console.log(`Reporte JSON: ${jsonReport}`);
   console.log(`Evidencias: ${SCREENSHOT_DIR}`);
+  if (sharedPage) await sharedPage.close().catch(() => {});
   await browser.close();
 })();
