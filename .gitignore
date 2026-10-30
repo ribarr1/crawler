@@ -1,3 +1,4 @@
+node_modules/
 .env
 auth-storage-state.json
 **/auth-storage-state.json
