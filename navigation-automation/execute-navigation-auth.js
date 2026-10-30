@@ -117,8 +117,16 @@ async function waitForActionResponse(page, urlBefore, bodyBefore, navigationProm
 
 async function acceptVisiblePopup(page) {
   const popupSelector = CONFIG.popupSelector || '[role="dialog"], [aria-modal="true"], .modal.show, .modal-dialog, .modal-content, .swal2-popup, .mat-dialog-container, .cdk-overlay-pane, .toast, .alert';
-  const acceptTexts = CONFIG.popupAcceptTexts || ['Aceptar', 'OK', 'Ok', 'Entendido', 'Continuar', 'Cerrar', 'Continuar', 'Sí', 'Si'];
-  const acceptAttributes = '[aria-label="Aceptar"], [aria-label="Cerrar"], [title="Aceptar"], [title="Cerrar"], [value="Aceptar"], [value="OK"], .btn-close, .close, .modal-close';
+  // Se prioriza cerrar sin confirmar (Cancelar/Cerrar) para no disparar acciones que creen o
+  // modifiquen datos (ej: "Cargar Operaciones"); solo se usa Aceptar si no hay forma de cancelar.
+  const dismissTexts = CONFIG.popupDismissTexts || ['Cancelar', 'Cancel', 'Cerrar', 'Close', 'No'];
+  const acceptTexts = CONFIG.popupAcceptTexts || ['Aceptar', 'OK', 'Ok', 'Entendido', 'Continuar', 'Sí', 'Si'];
+  const dismissAttributes = '[aria-label="Cancelar"], [aria-label="Cerrar"], [title="Cancelar"], [title="Cerrar"], .btn-close, .close, .modal-close';
+
+  const isControlDisabled = async control => control.evaluate(el =>
+    el.disabled === true || el.getAttribute('disabled') !== null || el.getAttribute('aria-disabled') === 'true'
+  ).catch(() => false);
+
   for (const frame of page.frames()) {
     if (!shouldInspectFrame(frame.url())) continue;
     const popup = frame.locator(popupSelector).last();
@@ -126,6 +134,7 @@ async function acceptVisiblePopup(page) {
 
     const controls = popup.locator('button, [role="button"], input[type="button"], input[type="submit"], a');
     const controlCount = await controls.count().catch(() => 0);
+    const candidates = [];
     for (let index = 0; index < controlCount; index += 1) {
       const button = controls.nth(index);
       if (!(await button.isVisible({ timeout: 500 }).catch(() => false))) continue;
@@ -135,17 +144,27 @@ async function acceptVisiblePopup(page) {
         await button.getAttribute('title').catch(() => '') ||
         await button.getAttribute('value').catch(() => '')
       );
-      if (!acceptTexts.some(text => label === normalizeKeyText(text))) continue;
-      await button.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => button.evaluate(element => element.click()));
-      await page.waitForTimeout(ACTION_SETTLE_WAIT_MS);
-      return true;
+      candidates.push({ button, label });
     }
 
-    const attributeButton = popup.locator(acceptAttributes).first();
-    if (await attributeButton.count().catch(() => 0) && await attributeButton.isVisible({ timeout: 500 }).catch(() => false)) {
-      await attributeButton.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => attributeButton.evaluate(element => element.click()));
+    // Primero se intenta cerrar sin confirmar; solo se usa un texto de aceptar si no hay opción de cancelar.
+    const orderedTexts = [...dismissTexts, ...acceptTexts];
+    for (const text of orderedTexts) {
+      const candidate = candidates.find(c => c.label === normalizeKeyText(text));
+      if (!candidate) continue;
+      if (await isControlDisabled(candidate.button)) continue;
+
+      await candidate.button.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => {});
       await page.waitForTimeout(ACTION_SETTLE_WAIT_MS);
-      return true;
+      if (!(await popup.isVisible({ timeout: 500 }).catch(() => false))) return true;
+    }
+
+    const attributeButton = popup.locator(dismissAttributes).first();
+    if (await attributeButton.count().catch(() => 0) && await attributeButton.isVisible({ timeout: 500 }).catch(() => false)
+      && !(await isControlDisabled(attributeButton))) {
+      await attributeButton.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => {});
+      await page.waitForTimeout(ACTION_SETTLE_WAIT_MS);
+      if (!(await popup.isVisible({ timeout: 500 }).catch(() => false))) return true;
     }
 
     const popupText = normalizeKeyText(await popup.innerText().catch(() => ''));
@@ -154,6 +173,11 @@ async function acceptVisiblePopup(page) {
       await page.waitForTimeout(ACTION_SETTLE_WAIT_MS);
       return true;
     }
+
+    // No se pudo cerrar de forma segura (ej: solo hay un Aceptar deshabilitado): se sale con Escape.
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(ACTION_SETTLE_WAIT_MS);
+    return !(await popup.isVisible({ timeout: 500 }).catch(() => false));
   }
   return false;
 }
@@ -384,22 +408,88 @@ function locatorsForFrame(frame, item) {
   return candidates;
 }
 
+// El elemento fue descubierto dentro de una pesta\u00f1a/submen\u00fa (ej: Perfiles, Historico) que
+// puede no estar activa en el momento de la ejecuci\u00f3n; se reactiva antes de reintentar la b\u00fasqueda.
+async function ensureTabActive(page, item) {
+  const tabText = cleanText(item.tabText);
+  const tabHref = item.tabHref;
+  if (!tabText && !tabHref) return false;
+
+  // Restauraci\u00f3n por href exacto: evita clics ambiguos (ej: un breadcrumb con el mismo texto).
+  if (tabHref) {
+    const safeHref = String(tabHref).replace(/"/g, '\\"');
+    for (const frame of page.frames().filter(f => shouldInspectFrame(f.url()))) {
+      const target = frame.locator(`a[href="${safeHref}"]`).first();
+      if (!(await target.count().catch(() => 0)) || !(await target.isVisible({ timeout: 500 }).catch(() => false))) continue;
+
+      await target.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+      await page.waitForTimeout(Number((CONFIG.tabClickDiscovery || {}).afterClickWaitMs || 1500));
+      return true;
+    }
+  }
+
+  if (!tabText) return false;
+
+  const cfg = CONFIG.submenuClickDiscovery || {};
+  const menuSelector = cfg.menuSelector || '#dropdownBasic1, button#dropdownBasic1, button.dropdown-toggle, button:has-text("Menú"), button:has-text("Menu")';
+  const itemSelector = cfg.itemSelector || 'button.dropdown-item, .dropdown-item, [class*="dropdown-item"], [role="menuitem"]';
+
+  for (const frame of page.frames().filter(f => shouldInspectFrame(f.url()))) {
+    const menu = frame.locator(menuSelector).first();
+    if (!(await menu.count().catch(() => 0)) || !(await menu.isVisible({ timeout: 500 }).catch(() => false))) continue;
+
+    await menu.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => {});
+    await page.waitForTimeout(Number(cfg.beforeClickWaitMs || 500));
+
+    const target = frame.locator(itemSelector).filter({ hasText: tabText }).first();
+    if (!(await target.count().catch(() => 0))) continue;
+
+    await target.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => {});
+    await page.waitForTimeout(Number(cfg.afterClickWaitMs || 1500));
+    return true;
+  }
+
+  // Pesta\u00f1as sin men\u00fa desplegable: enlaces/botones tipo tab visibles directamente en la p\u00e1gina.
+  const tabCfg = CONFIG.tabClickDiscovery || {};
+  const tabSelector = tabCfg.selector || 'a, [role="tab"], button';
+  for (const frame of page.frames().filter(f => shouldInspectFrame(f.url()))) {
+    const target = frame.locator(tabSelector).filter({ hasText: tabText }).first();
+    if (!(await target.count().catch(() => 0)) || !(await target.isVisible({ timeout: 500 }).catch(() => false))) continue;
+
+    await target.click({ timeout: CLICK_TIMEOUT_MS }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    await page.waitForTimeout(Number(tabCfg.afterClickWaitMs || 1500));
+    return true;
+  }
+  return false;
+}
+
 async function resolveLocator(page, item) {
   await ensureShellMenuOpen(page, item);
   await ensureMicroMenuOpen(page, item);
 
-  for (const frame of candidateFrames(page, item)) {
-    for (const locator of locatorsForFrame(frame, item)) {
-      try {
-        const count = await locator.count();
-        if (count > 0) {
-          const visible = await locator.isVisible({ timeout: 1200 }).catch(() => false);
-          if (visible) return locator;
-        }
-      } catch {}
+  const tryFind = async () => {
+    for (const frame of candidateFrames(page, item)) {
+      for (const locator of locatorsForFrame(frame, item)) {
+        try {
+          const count = await locator.count();
+          if (count > 0) {
+            const visible = await locator.isVisible({ timeout: 1200 }).catch(() => false);
+            if (visible) return locator;
+          }
+        } catch {}
+      }
     }
+    return null;
+  };
+
+  let locator = await tryFind();
+  if (!locator && item.tabText) {
+    const switched = await ensureTabActive(page, item);
+    if (switched) locator = await tryFind();
   }
-  return null;
+  return locator;
 }
 
 async function fallbackNavigateByHref(page, item, result, afterScreenshot) {

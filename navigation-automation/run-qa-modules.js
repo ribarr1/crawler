@@ -52,6 +52,17 @@ function moduleConfig(module) {
     submenuClickDiscovery: {
       ...(BASE_CONFIG.submenuClickDiscovery || {}),
       enabled: true
+    },
+    // Pesta\u00f1as internas del m\u00f3dulo (ej: Perfiles/Permisos, Operaciones por Asignar/Historico);
+    // si no hay pesta\u00f1as en la p\u00e1gina, este selector simplemente no encuentra candidatos.
+    tabClickDiscovery: {
+      ...(BASE_CONFIG.tabClickDiscovery || {}),
+      enabled: true,
+      selector: (BASE_CONFIG.tabClickDiscovery || {}).selector
+        || '[role="tab"], .nav-tabs .nav-link, .nav-tabs a, .nav-pills .nav-link, .mat-tab-label, .p-tabview-nav li a',
+      maxItems: 10,
+      clickTimeoutMs: 8000,
+      afterClickWaitMs: 1800
     }
   };
 }

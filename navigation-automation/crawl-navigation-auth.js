@@ -125,7 +125,7 @@ function writeCsv(filePath, rows) {
     'pageIndex', 'pageUrl', 'frameIndex', 'frameUrl', 'index', 'category', 'tag',
     'type', 'text', 'href', 'role', 'id', 'className', 'ariaLabel', 'title',
     'dataTestId', 'name', 'selector', 'recommendedLocator', 'normalizedHref',
-    'domPath', 'isActionable', 'actionKey'
+    'domPath', 'isActionable', 'actionKey', 'tabText', 'tabHref'
   ];
 
   const csvRows = [
@@ -715,6 +715,164 @@ async function extractElements(page, pageIndex) {
   return rows;
 }
 
+function normalizeHashlessUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    url.hash = '';
+    return url.href;
+  } catch {
+    return String(rawUrl || '').split('#')[0];
+  }
+}
+
+function getUrlHash(rawUrl) {
+  try { return new URL(rawUrl).hash || ''; } catch { return ''; }
+}
+
+// La pesta\u00f1a activa al momento de extraer los elementos base es aquella cuyo propio enlace
+// (mismo microfrontend, distinto hash) coincide con el hash actual del frame.
+function detectActiveTab(elements) {
+  for (const el of elements) {
+    if (el.category !== 'link') continue;
+    const href = el.normalizedHref || el.href;
+    if (!href || !el.frameUrl) continue;
+    if (normalizeHashlessUrl(href) !== normalizeHashlessUrl(el.frameUrl)) continue;
+    const hrefHash = getUrlHash(href);
+    if (hrefHash && hrefHash === getUrlHash(el.frameUrl)) return { text: cleanText(el.text), href };
+  }
+  return null;
+}
+
+// Clic por href exacto: evita ambig\u00fcedades de texto (ej: la pesta\u00f1a "Operaciones"
+// coincide con el texto del breadcrumb "Operaciones", que no cambia de pesta\u00f1a).
+async function clickHrefInFrames(page, href, timeoutMs) {
+  const safeHref = String(href).replace(/"/g, '\\"');
+  for (const frame of page.frames()) {
+    if (!shouldInspectFrame(frame.url())) continue;
+    const locator = frame.locator(`a[href="${safeHref}"]`).first();
+    const count = await locator.count().catch(() => 0);
+    if (count <= 0) continue;
+    const visible = await locator.isVisible({ timeout: 500 }).catch(() => false);
+    if (!visible) continue;
+
+    await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await locator.click({ timeout: timeoutMs }).catch(async () => {
+      await locator.evaluate(el => el.click()).catch(() => {});
+    });
+    return true;
+  }
+  return false;
+}
+
+function collectHashTabCandidates(elements) {
+  const seen = new Set();
+  const candidates = [];
+  for (const el of elements) {
+    if (el.category !== 'link') continue;
+    const text = cleanText(el.text);
+    const href = el.normalizedHref || el.href;
+    if (!text || !href || !el.frameUrl) continue;
+    if (normalizeHashlessUrl(href) !== normalizeHashlessUrl(el.frameUrl)) continue;
+
+    const hrefHash = getUrlHash(href);
+    if (!hrefHash || hrefHash === getUrlHash(el.frameUrl)) continue;
+
+    const key = `${el.frameUrl}|${hrefHash}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push({ text, href });
+  }
+  return candidates;
+}
+
+// Explora cada pesta\u00f1a interna de la p\u00e1gina (por hash propio o por selector configurable)
+// y etiqueta sus elementos con tabText/tabHref, para que la ejecuci\u00f3n sepa a qu\u00e9 pesta\u00f1a volver.
+async function discoverPageTabs(page, pageIndex, baseElements, activeTab) {
+  const result = { elements: [], tabs: [] };
+  const cfg = CONFIG.tabClickDiscovery || {};
+  if (cfg.enabled === false) return result;
+
+  const skipTexts = new Set((cfg.skipTexts || ['Cerrar sesión', 'Pruebas QA', 'visibility'])
+    .map(x => cleanText(x).toLowerCase())
+    .filter(Boolean));
+
+  const hashTabCandidates = collectHashTabCandidates(baseElements)
+    .filter(candidate => !skipTexts.has(candidate.text.toLowerCase()));
+
+  const selectorCandidates = cfg.selector
+    ? await collectSelectorTabCandidates(page, cfg.selector, skipTexts)
+    : [];
+
+  const seenText = new Set(hashTabCandidates.map(c => c.text.toLowerCase()));
+  const candidates = [
+    ...hashTabCandidates,
+    ...selectorCandidates.filter(c => !seenText.has(c.text.toLowerCase()))
+  ].slice(0, Number(cfg.maxItems || 10));
+
+  if (!candidates.length) return result;
+
+  const clickTimeoutMs = Number(cfg.clickTimeoutMs || 8000);
+  const afterClickWaitMs = Number(cfg.afterClickWaitMs || 1500);
+  const tabSelector = cfg.selector || 'a, [role="tab"], button';
+
+  console.log(`Pesta\u00f1as detectadas: ${candidates.length}`);
+
+  for (const [idx, candidate] of candidates.entries()) {
+    try {
+      const clicked = candidate.href
+        ? await clickHrefInFrames(page, candidate.href, clickTimeoutMs)
+        : await clickFirstVisibleInFrames(page, tabSelector, candidate.text, clickTimeoutMs);
+      if (!clicked) continue;
+
+      await page.waitForLoadState('networkidle', { timeout: TIMEOUT_MS }).catch(() => {});
+      await page.waitForTimeout(afterClickWaitMs);
+
+      const tabPageIndex = `${pageIndex}.tab${String(idx + 1).padStart(2, '0')}`;
+      const tabElements = await extractElements(page, tabPageIndex);
+      const taggedElements = tabElements.map(element => ({ ...element, tabText: candidate.text, tabHref: candidate.href || '' }));
+      result.elements.push(...taggedElements);
+      result.tabs.push(candidate.text);
+
+      console.log(`  Pesta\u00f1a ${idx + 1}/${candidates.length}: ${candidate.text} | Elementos=${tabElements.length}`);
+    } catch (error) {
+      console.warn(`  Error explorando pesta\u00f1a ${candidate.text}: ${error.message}`);
+    }
+  }
+
+  if (activeTab) {
+    const restored = activeTab.href
+      ? await clickHrefInFrames(page, activeTab.href, clickTimeoutMs).catch(() => false)
+      : await clickFirstVisibleInFrames(page, tabSelector, activeTab.text, clickTimeoutMs).catch(() => false);
+    if (restored) await page.waitForTimeout(afterClickWaitMs);
+  }
+
+  return result;
+}
+
+async function collectSelectorTabCandidates(page, selector, skipTexts) {
+  const candidates = [];
+  for (const frame of page.frames()) {
+    if (!shouldInspectFrame(frame.url())) continue;
+    const rows = await frame.$$eval(selector, (nodes) => nodes.map(el => String(
+      el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || ''
+    ).replace(/\s+/g, ' ').trim())).catch(() => []);
+
+    for (const rawText of rows) {
+      const text = cleanText(rawText);
+      if (!text || skipTexts.has(text.toLowerCase())) continue;
+      candidates.push({ text });
+    }
+  }
+
+  const seen = new Set();
+  return candidates.filter(item => {
+    const key = item.text.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 
 async function collectMenuCandidates(page) {
   const cfg = CONFIG.menuClickDiscovery || {};
@@ -919,7 +1077,10 @@ async function discoverByClickingSubmenus(page, pageIndex) {
       const afterUrl = page.url();
       const subPageIndex = `${pageIndex}.sub${String(idx + 1).padStart(2, '0')}`;
       const elements = await extractElements(page, subPageIndex);
-      result.elements.push(...elements);
+      // Se etiqueta cada elemento con la pestaña/submenú desde la que fue descubierto,
+      // así el execute puede reactivarla si el elemento no aparece en la pestaña por defecto.
+      const taggedElements = elements.map(element => ({ ...element, tabText: candidate.text }));
+      result.elements.push(...taggedElements);
       result.clicked.push({
         ...candidate,
         status: 'CLICKED',
@@ -1081,13 +1242,23 @@ function uniqueByAction(rows) {
         await inspectDom(page, OUTPUT_DIR, `crawl_page_${String(pageIndex).padStart(3, '0')}`);
       }
 
-      const elements = await extractElements(page, pageIndex);
+      const rawElements = await extractElements(page, pageIndex);
+      const activeTab = detectActiveTab(rawElements);
+      const elements = activeTab
+        ? rawElements.map(element => (element.tabText ? element : { ...element, tabText: activeTab.text, tabHref: activeTab.href }))
+        : rawElements;
       allElements.push(...elements);
 
       const pageFile = path.join(OUTPUT_DIR, 'pages', safeFileName(currentUrl, pageIndex));
       writeCsv(pageFile, elements);
 
       console.log(`  Frames: ${page.frames().length} | Elementos: ${elements.length} | Accionables: ${elements.filter(x => x.isActionable).length}`);
+
+      const tabDiscovery = await discoverPageTabs(page, pageIndex, elements, activeTab);
+      if (tabDiscovery.elements.length > 0) {
+        allElements.push(...tabDiscovery.elements);
+        console.log(`  Pesta\u00f1as exploradas: ${tabDiscovery.tabs.join(', ')} | Elementos adicionales: ${tabDiscovery.elements.length}`);
+      }
 
       if (pageIndex === 1 || CONFIG.menuClickDiscovery?.runOnEveryPage) {
         const menuDiscovery = await discoverByClickingMenu(page, pageIndex);
